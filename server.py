@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Optional device name and log file
 deviceName = sys.argv[1] if len(sys.argv) > 1 else 'RangeWhite24'
-logFile = sys.argv[2] if len(sys.argv) > 2 else None
+logFile = sys.argv[2] if len(sys.argv) > 2 else '/tmp/artisan.log'
 
 # Get the BLE provider for the current platform.
 ble = Adafruit_BluefruitLE.get_provider()
@@ -37,6 +37,23 @@ def find_device(adapter, name):
 def to_fahrenheit(celsius):
     return 9.0/5.0 * celsius + 32
 
+def parse_temperature(value, celsius):
+    if value == '\x81\x0c':
+        return 0.0
+    value = struct.unpack('>H', value)
+    if len(value) > 0:
+        value = value[0] / 100.0
+        # Remove the outliers according to Dial operating range (10C - 230C)
+        if value < 10 or value > 230:
+            return None
+        if not celsius:
+            value = to_fahrenheit(value)
+        # Correction for sensor accuracy
+        if value > 356.5 and value <= 388.9:
+            correction = (value - 356.5) / (388.9 - 356)
+            value += correction * 9 + 1.0
+        return value
+
 # Parse datapoint from the Range dial.
 # The Range sends three types of messages.
 # First byte defines the message types:
@@ -49,20 +66,18 @@ def to_fahrenheit(celsius):
 # The temperature is a fixed-point number in celsius, e.g. 2868 equals to 28.68 degrees C
 def parse_datapoint(data, celsius = False):
     if len(data) == 0:
-        return
+        return None, None
 
     # Some kind of control command (e.g. 'V\x08\0x05')
     if data[0] == 'V':
-        return
+        return None, None
 
     # Temperature data point
     if data[0] == 'T':
         data = data[1:]
-        value = data[2:] if data[:2] == '\x81\x0c' else data[:2]
-        value = struct.unpack('>H', value)
-        if len(value) > 0:
-            value = value[0] / 100.0
-            return value if celsius else to_fahrenheit(value)
+        return parse_temperature(data[:2], celsius), parse_temperature(data[2:], celsius)
+        
+    return None, None
 
 # Main function implements the program logic so it can run in a background
 # thread.  Most platforms require the main thread to handle GUI events and other
@@ -98,15 +113,15 @@ def main():
             received = uart.read(timeout_sec=5)
             if received is not None:
                 logging.debug('received {0} bytes: {1}'.format(len(received), received))
-                temp = parse_datapoint(received)
-                if not temp:
+                t1, t2 = parse_datapoint(received)
+                if not t1 and not t2:
                     continue
                 # Log temperature data to file or stdout
                 if logFile:
                     with open(logFile, 'w') as fp:
-                        fp.write('{0}'.format(temp))
+                        fp.write('{0},{1}'.format(t1, t2))
                 else:
-                    print(temp)
+                    print('{0},{1}'.format(t1, t2))
 
             else:
                 # Timeout waiting for data, None is returned.
